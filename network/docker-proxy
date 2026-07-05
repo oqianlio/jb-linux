@@ -1,0 +1,190 @@
+#!/bin/bash
+# Docker 守护进程代理管理脚本（交互式菜单）
+# 用法: sudo docker-proxy
+
+CONFIG_DIR="/etc/systemd/system/docker.service.d"
+CONFIG_FILE="$CONFIG_DIR/http-proxy.conf"
+BACKUP_SUFFIX=".bak"
+
+# ---------- 颜色定义 ----------
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+# ---------- 获取当前代理配置 ----------
+get_current_proxy() {
+    if [ -f "$CONFIG_FILE" ]; then
+        # 提取 HTTP_PROXY 的值
+        http_proxy=$(grep -o 'HTTP_PROXY="[^"]*"' "$CONFIG_FILE" 2>/dev/null | head -1 | cut -d'"' -f2)
+        if [ -n "$http_proxy" ]; then
+            echo "$http_proxy"
+        else
+            echo "未配置"
+        fi
+    else
+        echo "未配置"
+    fi
+}
+
+# ---------- 开启 Docker 代理 ----------
+enable_proxy() {
+    local proxy_addr="$1"
+    echo -e "${BLUE}>>> 正在为 Docker 守护进程开启代理: $proxy_addr${NC}"
+
+    # 创建配置目录（如果不存在）
+    sudo mkdir -p "$CONFIG_DIR"
+
+    # 写入配置（使用 tee 覆盖）
+    sudo tee "$CONFIG_FILE" > /dev/null <<EOF
+[Service]
+Environment="HTTP_PROXY=$proxy_addr"
+Environment="HTTPS_PROXY=$proxy_addr"
+Environment="NO_PROXY=localhost,127.0.0.1,::1,192.168.0.0/16,10.0.0.0/8"
+EOF
+
+    echo -e "${GREEN}    配置已写入: $CONFIG_FILE${NC}"
+
+    # 重启 Docker
+    echo -e "${BLUE}>>> 重启 Docker 服务...${NC}"
+    sudo systemctl daemon-reload
+    if sudo systemctl restart docker; then
+        echo -e "${GREEN}✅ Docker 代理已开启并生效${NC}"
+    else
+        echo -e "${RED}❌ Docker 重启失败，请手动检查${NC}"
+        return 1
+    fi
+}
+
+# ---------- 关闭 Docker 代理 ----------
+disable_proxy() {
+    echo -e "${BLUE}>>> 正在关闭 Docker 守护进程代理...${NC}"
+
+    if [ -f "$CONFIG_FILE" ]; then
+        # 备份配置
+        sudo cp "$CONFIG_FILE" "${CONFIG_FILE}${BACKUP_SUFFIX}"
+        echo -e "${YELLOW}    已备份配置到: ${CONFIG_FILE}${BACKUP_SUFFIX}${NC}"
+        # 删除配置文件
+        sudo rm -f "$CONFIG_FILE"
+        echo -e "${GREEN}    已删除代理配置${NC}"
+    else
+        echo -e "${YELLOW}    当前没有代理配置${NC}"
+    fi
+
+    # 重启 Docker
+    echo -e "${BLUE}>>> 重启 Docker 服务...${NC}"
+    sudo systemctl daemon-reload
+    if sudo systemctl restart docker; then
+        echo -e "${GREEN}✅ Docker 代理已关闭${NC}"
+    else
+        echo -e "${RED}❌ Docker 重启失败，请手动检查${NC}"
+        return 1
+    fi
+}
+
+# ---------- 测试代理连通性 ----------
+test_proxy() {
+    local proxy="$1"
+    if [ -z "$proxy" ]; then
+        echo -e "${RED}当前没有配置代理${NC}"
+        return 1
+    fi
+    echo -e "${BLUE}>>> 测试代理连通性: $proxy${NC}"
+    # 使用 curl 通过代理访问 Docker Hub
+    if curl -s -o /dev/null -w "%{http_code}" -m 5 -x "$proxy" https://registry-1.docker.io/v2/ | grep -q "200\|401"; then
+        echo -e "${GREEN}    ✅ 代理可用 (返回 HTTP 200/401)${NC}"
+    else
+        echo -e "${RED}    ❌ 代理无法连接或超时${NC}"
+    fi
+}
+
+# ---------- 显示状态 ----------
+show_status() {
+    echo -e "${BLUE}>>> Docker 守护进程代理状态${NC}"
+    current=$(get_current_proxy)
+    if [ "$current" = "未配置" ]; then
+        echo -e "  当前代理: ${YELLOW}未配置${NC}"
+    else
+        echo -e "  当前代理: ${GREEN}$current${NC}"
+    fi
+    # 显示 systemd 环境变量
+    envs=$(systemctl show docker --property=Environment 2>/dev/null | grep -o 'HTTP_PROXY=[^ ]*' | head -1)
+    if [ -n "$envs" ]; then
+        echo -e "  Systemd 变量: ${GREEN}$envs${NC}"
+    else
+        echo -e "  Systemd 变量: ${YELLOW}无${NC}"
+    fi
+}
+
+# ---------- 交互式菜单 ----------
+show_menu() {
+    clear
+    echo "========================================"
+    echo "     🐳 Docker 守护进程代理管理工具"
+    echo "========================================"
+    current=$(get_current_proxy)
+    echo -e "  当前代理: ${GREEN}${current}${NC}"
+    echo "========================================"
+    echo "  1. 开启 Docker 代理（输入地址）"
+    echo "  2. 关闭 Docker 代理"
+    echo "  3. 测试当前代理连通性"
+    echo "  4. 查看详细状态"
+    echo "  5. 退出"
+    echo "========================================"
+    read -p "请输入数字 [1-5]: " choice
+
+    case $choice in
+        1)
+            read -p "请输入代理地址（例如 http://192.168.1.205:7897）: " proxy
+            if [ -z "$proxy" ]; then
+                echo -e "${RED}地址不能为空${NC}"
+            else
+                enable_proxy "$proxy"
+            fi
+            read -p "按回车键继续..."
+            ;;
+        2)
+            disable_proxy
+            read -p "按回车键继续..."
+            ;;
+        3)
+            current=$(get_current_proxy)
+            if [ "$current" != "未配置" ]; then
+                test_proxy "$current"
+            else
+                echo -e "${YELLOW}当前未配置代理${NC}"
+            fi
+            read -p "按回车键继续..."
+            ;;
+        4)
+            show_status
+            read -p "按回车键继续..."
+            ;;
+        5)
+            echo "退出。"
+            exit 0
+            ;;
+        *)
+            echo -e "${RED}无效输入${NC}"
+            sleep 1
+            ;;
+    esac
+}
+
+# ---------- 主逻辑 ----------
+if [ "$EUID" -ne 0 ]; then
+    echo -e "${RED}请使用 sudo 或 root 用户运行此脚本。${NC}"
+    exit 1
+fi
+
+# 检查 Docker 是否安装
+if ! command -v docker &> /dev/null; then
+    echo -e "${RED}❌ 未检测到 Docker，请先安装 Docker。${NC}"
+    exit 1
+fi
+
+# 循环菜单
+while true; do
+    show_menu
+done

@@ -1,0 +1,114 @@
+#!/bin/bash
+# 全局代理管理脚本（支持运行时输入代理地址）
+# 用法: sudo proxy-global
+
+CONFIG_FILE="/etc/proxy-global.conf"
+ENV_FILE="/etc/environment"
+
+# ---------- 读取或输入代理地址 ----------
+get_proxy_addr() {
+    if [ -f "$CONFIG_FILE" ] && [ -s "$CONFIG_FILE" ]; then
+        saved_addr=$(cat "$CONFIG_FILE")
+        echo "上次使用的代理地址: $saved_addr"
+        read -p "请输入新的代理地址（直接回车使用上次地址）: " input_addr
+        if [ -n "$input_addr" ]; then
+            PROXY_ADDR="$input_addr"
+        else
+            PROXY_ADDR="$saved_addr"
+        fi
+    else
+        read -p "请输入代理地址（例如 http://192.168.1.100:7890 或 socks5://127.0.0.1:1080）: " PROXY_ADDR
+        if [ -z "$PROXY_ADDR" ]; then
+            echo "错误：代理地址不能为空！"
+            exit 1
+        fi
+    fi
+    echo "$PROXY_ADDR" > "$CONFIG_FILE"
+    echo "代理地址已保存：$PROXY_ADDR"
+}
+
+# ---------- 开启全局代理 ----------
+proxy_on() {
+    get_proxy_addr
+    echo ">>> 正在开启全局代理（$PROXY_ADDR）..."
+    systemctl set-environment http_proxy="$PROXY_ADDR"
+    systemctl set-environment https_proxy="$PROXY_ADDR"
+    echo "    Systemd 环境变量已设置"
+    grep -q "^http_proxy=" $ENV_FILE 2>/dev/null
+    if [ $? -ne 0 ]; then
+        echo "http_proxy=\"$PROXY_ADDR\"" >> $ENV_FILE
+        echo "https_proxy=\"$PROXY_ADDR\"" >> $ENV_FILE
+        echo "no_proxy=\"localhost,127.0.0.1,::1,192.168.0.0/16,10.0.0.0/8\"" >> $ENV_FILE
+        echo "    已写入 $ENV_FILE"
+    else
+        sudo sed -i "s|^#\?http_proxy=.*|http_proxy=\"$PROXY_ADDR\"|" $ENV_FILE
+        sudo sed -i "s|^#\?https_proxy=.*|https_proxy=\"$PROXY_ADDR\"|" $ENV_FILE
+        grep -q "^no_proxy=" $ENV_FILE || echo "no_proxy=\"localhost,127.0.0.1,::1,192.168.0.0/16,10.0.0.0/8\"" >> $ENV_FILE
+        echo "    已更新 $ENV_FILE"
+    fi
+    echo "✅ 全局代理已开启！"
+    echo "注意：当前终端需执行 'source /etc/environment' 或重新登录。"
+}
+
+# ---------- 关闭全局代理 ----------
+proxy_off() {
+    echo ">>> 正在彻底关闭全局代理..."
+    systemctl unset-environment http_proxy https_proxy
+    echo "    Systemd 环境变量已清除"
+    if [ -f $ENV_FILE ]; then
+        sudo sed -i 's/^http_proxy=/#http_proxy=/' $ENV_FILE
+        sudo sed -i 's/^https_proxy=/#https_proxy=/' $ENV_FILE
+        sudo sed -i 's/^no_proxy=/#no_proxy=/' $ENV_FILE
+        echo "    已注释 $ENV_FILE 中的代理配置"
+    fi
+    echo "✅ 全局代理已关闭！"
+}
+
+# ---------- 查看当前代理地址 ----------
+show_current() {
+    if [ -f "$CONFIG_FILE" ] && [ -s "$CONFIG_FILE" ]; then
+        echo "当前保存的代理地址: $(cat $CONFIG_FILE)"
+    else
+        echo "尚未设置代理地址。"
+    fi
+}
+
+# ---------- 交互式菜单 ----------
+show_menu() {
+    clear
+    echo "========================================"
+    echo "       🌐 全局代理管理工具"
+    echo "========================================"
+    show_current
+    echo "========================================"
+    echo "  1. 开启全局代理（输入地址）"
+    echo "  2. 关闭全局代理"
+    echo "  3. 查看当前代理地址"
+    echo "  4. 退出"
+    echo "========================================"
+    read -p "请输入数字 [1-4]: " choice
+    case $choice in
+        1) proxy_on ;;
+        2) proxy_off ;;
+        3) show_current ; read -p "按回车键继续..." ;;
+        4) echo "退出。" ; exit 0 ;;
+        *) echo "无效输入。" ; exit 1 ;;
+    esac
+}
+
+# ---------- 主逻辑 ----------
+if [ "$EUID" -ne 0 ]; then
+    echo "请使用 sudo 或 root 用户运行此脚本。"
+    exit 1
+fi
+
+if [ "$1" == "on" ]; then
+    proxy_on
+elif [ "$1" == "off" ]; then
+    proxy_off
+elif [ -z "$1" ]; then
+    show_menu
+else
+    echo "用法: $0 [on|off]  或直接运行（交互式菜单）"
+    exit 1
+fi

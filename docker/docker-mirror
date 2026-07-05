@@ -1,0 +1,203 @@
+#!/bin/bash
+# Docker 镜像源切换脚本（交互式菜单）
+# 用法: sudo docker-mirror
+# 更新：修复镜像源提取逻辑，增强测试功能
+
+DAEMON_JSON="/etc/docker/daemon.json"
+BACKUP_SUFFIX=".bak"
+
+# ---------- 颜色 ----------
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+# ---------- 镜像源列表（仅公共免费，无需登录） ----------
+declare -A MIRRORS
+MIRRORS[1]="轩辕镜像|https://docker.xuanyuan.me|公益，速度约12MB/s"
+MIRRORS[2]="毫秒镜像|https://docker.1ms.run|商业，速度约11MB/s，稳定"
+MIRRORS[3]="DaoCloud|https://docker.m.daocloud.io|老牌公益，速度约9.5MB/s"
+MIRRORS[4]="1Panel社区镜像|https://docker.1panel.live|公共可用，限制中国地区"
+MIRRORS[5]="AtomHub|https://atomhub.openatom.cn|官方公益，仅基础镜像"
+MIRRORS[6]="简行镜像|https://docker.jiaxin.site|公共可用"
+MIRRORS[7]="恢复官方源|https://registry-1.docker.io|切换回Docker官方源"
+
+# ---------- 获取当前镜像源（增强版） ----------
+get_current_mirror() {
+    if [ ! -f "$DAEMON_JSON" ]; then
+        echo "未配置"
+        return
+    fi
+
+    # 方法1：尝试使用 jq（更精确）
+    if command -v jq &> /dev/null; then
+        mirror=$(jq -r '.["registry-mirrors"][0] // empty' "$DAEMON_JSON" 2>/dev/null)
+        if [ -n "$mirror" ]; then
+            echo "$mirror"
+            return
+        fi
+    fi
+
+    # 方法2：使用 grep + sed（兼容无jq环境）
+    # 提取 registry-mirrors 数组的第一个 "http://..." 或 "https://..." 地址
+    mirror=$(grep -o '"registry-mirrors"[[:space:]]*:[[:space:]]*\[[^]]*\]' "$DAEMON_JSON" 2>/dev/null | \
+             grep -o '"https\?://[^"]*"' | head -1 | tr -d '"')
+    if [ -n "$mirror" ]; then
+        echo "$mirror"
+    else
+        echo "未配置"
+    fi
+}
+
+# ---------- 切换镜像源 ----------
+switch_mirror() {
+    local mirror_url="$1"
+    local mirror_name="$2"
+    
+    echo -e "${BLUE}>>> 正在切换镜像源到: ${mirror_name}${NC}"
+    echo -e "${BLUE}    地址: ${mirror_url}${NC}"
+    
+    if [ -f "$DAEMON_JSON" ]; then
+        sudo cp "$DAEMON_JSON" "${DAEMON_JSON}${BACKUP_SUFFIX}"
+        echo -e "${YELLOW}    已备份到: ${DAEMON_JSON}${BACKUP_SUFFIX}${NC}"
+    fi
+    
+    if [ "$mirror_url" = "https://registry-1.docker.io" ]; then
+        sudo tee "$DAEMON_JSON" > /dev/null << 'EOF'
+{
+  "registry-mirrors": []
+}
+EOF
+    else
+        sudo tee "$DAEMON_JSON" > /dev/null << EOF
+{
+  "registry-mirrors": [
+    "${mirror_url}",
+    "https://registry-1.docker.io"
+  ]
+}
+EOF
+    fi
+    
+    echo -e "${BLUE}>>> 重启 Docker 服务...${NC}"
+    if systemctl restart docker 2>/dev/null; then
+        echo -e "${GREEN}✅ Docker 服务已重启${NC}"
+    else
+        echo -e "${RED}❌ Docker 重启失败，请手动执行: systemctl restart docker${NC}"
+        return 1
+    fi
+    
+    echo -e "${BLUE}>>> 验证配置...${NC}"
+    docker info 2>/dev/null | grep -A 2 "Registry Mirrors" || echo -e "${YELLOW}    未找到 Registry Mirrors${NC}"
+    
+    echo -e "${GREEN}✅ 镜像源已切换为: ${mirror_name}${NC}"
+    echo -e "${YELLOW}备份文件: ${DAEMON_JSON}${BACKUP_SUFFIX}${NC}"
+}
+
+# ---------- 测试镜像源连通性（增强） ----------
+test_mirror() {
+    local url="$1"
+    if [ -z "$url" ] || [ "$url" = "未配置" ]; then
+        echo -e "${RED}当前未配置镜像源${NC}"
+        return 1
+    fi
+    echo -e "${BLUE}>>> 测试连通性: ${url}${NC}"
+    
+    # 注意：有些镜像源需要访问 /v2/ 路径，我们测试根路径和 /v2/ 两个地址
+    for path in "" "/v2/"; do
+        test_url="${url}${path}"
+        echo -e "  尝试 ${test_url}"
+        status=$(curl -s -o /dev/null -w "%{http_code}" -m 5 "$test_url" 2>/dev/null)
+        case "$status" in
+            200|301|302|401|403)
+                echo -e "    ${GREEN}✅ 连通正常 (HTTP $status)${NC}"
+                return 0
+                ;;
+            *)
+                echo -e "    ${YELLOW}HTTP $status (可能不可达)${NC}"
+                ;;
+        esac
+    done
+    
+    echo -e "${RED}❌ 镜像源无法连接 (超时或拒绝)${NC}"
+    return 1
+}
+
+# ---------- 显示菜单 ----------
+show_menu() {
+    clear
+    echo "========================================"
+    echo "       🐳 Docker 镜像源管理工具"
+    echo "========================================"
+    current=$(get_current_mirror)
+    echo -e "  当前镜像源: ${GREEN}${current}${NC}"
+    echo "========================================"
+    echo "  请选择要切换的镜像源（公共免费，无需登录）："
+    echo ""
+    for i in {1..7}; do
+        IFS='|' read -r name url desc <<< "${MIRRORS[$i]}"
+        echo "  ${i}. ${name}"
+        echo "     地址: ${url}"
+        echo "     说明: ${desc}"
+        echo ""
+    done
+    echo "  t. 测试当前镜像源连通性"
+    echo "  r. 恢复备份配置"
+    echo "  c. 自定义输入镜像源地址"
+    echo "  q. 退出"
+    echo "========================================"
+    read -p "请输入数字或命令 [1-7/t/r/c/q]: " choice
+    
+    case $choice in
+        1|2|3|4|5|6|7)
+            IFS='|' read -r name url desc <<< "${MIRRORS[$choice]}"
+            switch_mirror "$url" "$name"
+            ;;
+        t|T)
+            current=$(get_current_mirror)
+            test_mirror "$current"
+            ;;
+        r|R)
+            if [ -f "${DAEMON_JSON}${BACKUP_SUFFIX}" ]; then
+                sudo cp "${DAEMON_JSON}${BACKUP_SUFFIX}" "$DAEMON_JSON"
+                systemctl restart docker
+                echo -e "${GREEN}✅ 已恢复备份配置${NC}"
+            else
+                echo -e "${RED}❌ 没有找到备份文件${NC}"
+            fi
+            ;;
+        c|C)
+            read -p "请输入自定义镜像源地址（例如 https://my-mirror.com）: " custom_url
+            if [ -n "$custom_url" ]; then
+                switch_mirror "$custom_url" "自定义源"
+            else
+                echo -e "${RED}地址不能为空${NC}"
+            fi
+            ;;
+        q|Q)
+            echo "退出。"
+            exit 0
+            ;;
+        *)
+            echo -e "${RED}无效输入${NC}"
+            sleep 1
+            ;;
+    esac
+    read -p "按回车键继续..."
+}
+
+# ---------- 主逻辑 ----------
+if [ "$EUID" -ne 0 ]; then
+    echo -e "${RED}请使用 sudo 或 root 用户运行此脚本。${NC}"
+    exit 1
+fi
+
+if ! command -v docker &> /dev/null; then
+    echo -e "${RED}❌ 未检测到 Docker，请先安装 Docker。${NC}"
+    exit 1
+fi
+
+while true; do
+    show_menu
+done
