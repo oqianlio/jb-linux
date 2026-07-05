@@ -23,6 +23,15 @@ get_proxy_addr() {
             exit 1
         fi
     fi
+    # 自动补全 http:// 前缀（如果用户未输入协议）
+    case "$PROXY_ADDR" in
+        http://*|https://*|socks4://*|socks5://*)
+            ;;
+        *)
+            PROXY_ADDR="http://$PROXY_ADDR"
+            echo -e "${YELLOW}    自动补全协议前缀: ${PROXY_ADDR}${NC}"
+            ;;
+    esac
     echo "$PROXY_ADDR" > "$CONFIG_FILE"
     echo "代理地址已保存：$PROXY_ADDR"
 }
