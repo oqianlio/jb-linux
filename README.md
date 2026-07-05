@@ -1,6 +1,7 @@
 # jb-linux
 
 Ubuntu/Debian 服务器脚本工具集，解决网络代理和 Docker 镜像源配置问题。
+###自用
 
 ## 脚本说明
 
